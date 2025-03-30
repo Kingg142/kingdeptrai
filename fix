@@ -1,0 +1,208 @@
+-- Kiểm tra nếu Aiming đã tồn tại
+if getgenv().Aiming then return getgenv().Aiming end
+
+-- Xóa LocalScript trong nhân vật (từ script Da Hood)
+for i, v in pairs(game.Players.LocalPlayer.Character:GetChildren()) do
+    if v:FindFirstChild("LocalScript") then
+        v:Destroy()
+    end
+end
+
+-- Dịch vụ
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local GuiService = game:GetService("GuiService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+-- Biến cơ bản
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+local CurrentCamera = Workspace.CurrentCamera
+local Heartbeat = RunService.Heartbeat
+
+-- Tối ưu hóa biến (từ silent2)
+local Drawingnew = Drawing.new
+local Color3fromRGB = Color3.fromRGB
+local Vector2new = Vector2.new
+local GetGuiInset = GuiService.GetGuiInset
+local Randomnew = Random.new
+local mathfloor = math.floor
+local WorldToViewportPoint = CurrentCamera.WorldToViewportPoint
+local RaycastParamsnew = RaycastParams.new
+local EnumRaycastFilterTypeBlacklist = Enum.RaycastFilterType.Blacklist
+local Raycast = Workspace.Raycast
+
+-- Cấu hình Silent Aim (kết hợp cả hai script)
+getgenv().Aiming = {
+    Enabled = true,
+    ShowFOV = false,
+    FOV = 10, -- FOV từ silent2
+    FOVSides = 300,
+    FOVColour = Color3fromRGB(255, 0, 0),
+    VisibleCheck = true,
+    HitChance = 91,
+    Selected = nil,
+    SelectedPart = nil,
+    TargetPart = {"Head", "LowerTorso"}, -- Từ silent2
+    Ignored = {
+        Teams = { {Team = LocalPlayer.Team, TeamColor = LocalPlayer.TeamColor} },
+        Players = {LocalPlayer}
+    }
+}
+local Aiming = getgenv().Aiming
+
+-- Cấu hình Da Hood (từ script cũ)
+local DaHoodSettings = {
+    SilentAim = true,
+    AimLock = false,
+    Prediction = 0.157, -- Từ script Da Hood
+    AimLockKeybind = Enum.KeyCode.E
+}
+getgenv().DaHoodSettings = DaHoodSettings
+
+-- Tạo vòng tròn FOV
+local circle = Drawingnew("Circle")
+circle.Transparency = 1
+circle.Thickness = 2
+circle.Color = Aiming.FOVColour
+circle.Filled = false
+Aiming.FOVCircle = circle
+
+-- Cập nhật FOV
+function Aiming.UpdateFOV()
+    if not circle then return end
+    circle.Visible = Aiming.ShowFOV
+    circle.Radius = Aiming.FOV * 3
+    circle.Position = Vector2new(Mouse.X, Mouse.Y + GetGuiInset(GuiService).Y)
+    circle.NumSides = Aiming.FOVSides
+    circle.Color = Aiming.FOVColour
+    return circle
+end
+
+-- Hàm kiểm tra xác suất trúng
+local function CalcChance(percentage)
+    percentage = mathfloor(percentage)
+    local chance = mathfloor(Randomnew().NextNumber(Randomnew(), 0, 1) * 100) / 100
+    return chance <= percentage / 100
+end
+
+-- Kiểm tra phần cơ thể có nhìn thấy không
+function Aiming.IsPartVisible(Part, PartDescendant)
+    local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local Origin = CurrentCamera.CFrame.Position
+    local _, OnScreen = WorldToViewportPoint(Part.Position)
+
+    if OnScreen then
+        local raycastParams = RaycastParamsnew()
+        raycastParams.FilterType = EnumRaycastFilterTypeBlacklist
+        raycastParams.FilterDescendantsInstances = {Character, CurrentCamera}
+        local Result = Raycast(Workspace, Origin, Part.Position - Origin, raycastParams)
+        
+        if Result then
+            local PartHit = Result.Instance
+            return not PartHit or PartHit:IsDescendantOf(PartDescendant)
+        end
+    end
+    return false
+end
+
+-- Kiểm tra sức khỏe
+function Aiming.CheckHealth(Player)
+    local Character = Player.Character
+    local Humanoid = Character and Character:FindFirstChildWhichIsA("Humanoid")
+    return Humanoid and Humanoid.Health > 0
+end
+
+-- Kiểm tra mục tiêu hợp lệ (kết hợp cả hai)
+function Aiming.Check()
+    if not (Aiming.Enabled and Aiming.Selected ~= LocalPlayer and Aiming.SelectedPart) then
+        return false
+    end
+
+    local Character = Aiming.Selected.Character
+    if not Character then return false end
+
+    local KOd = Character:FindFirstChild("BodyEffects") and Character.BodyEffects["K.O"].Value
+    local Grabbed = Character:FindFirstChild("GRABBING_CONSTRAINT") ~= nil
+
+    return not (KOd or Grabbed) and Aiming.CheckHealth(Aiming.Selected)
+end
+
+-- Lấy phần cơ thể gần nhất
+function Aiming.GetClosestTargetPartToCursor(Character)
+    local ClosestPart, ShortestDistance = nil, math.huge
+    for _, PartName in ipairs(Aiming.TargetPart) do
+        local Part = Character:FindFirstChild(PartName)
+        if Part then
+            local PartPos, OnScreen = WorldToViewportPoint(Part.Position)
+            local Magnitude = (Vector2new(PartPos.X, PartPos.Y - GetGuiInset(GuiService).Y) - Vector2new(Mouse.X, Mouse.Y)).Magnitude
+            if Magnitude < ShortestDistance then
+                ClosestPart, ShortestDistance = Part, Magnitude
+            end
+        end
+    end
+    return ClosestPart
+end
+
+-- Lấy người chơi gần nhất
+function Aiming.GetClosestPlayerToCursor()
+    local TargetPart, ClosestPlayer, ShortestDistance = nil, nil, math.huge
+    if not CalcChance(Aiming.HitChance) then
+        Aiming.Selected = LocalPlayer
+        Aiming.SelectedPart = nil
+        return LocalPlayer
+    end
+
+    for _, Player in ipairs(Players:GetPlayers()) do
+        if Player ~= LocalPlayer and not Aiming.IsIgnored(Player) then
+            local Character = Player.Character
+            if Character and Aiming.CheckHealth(Player) then
+                local Part = Aiming.GetClosestTargetPartToCursor(Character)
+                if Part then
+                    local _, _, Magnitude = Aiming.GetClosestTargetPartToCursor(Character)
+                    if circle.Radius > Magnitude and Magnitude < ShortestDistance then
+                        if Aiming.VisibleCheck and not Aiming.IsPartVisible(Part, Character) then continue end
+                        ClosestPlayer, TargetPart, ShortestDistance = Player, Part, Magnitude
+                    end
+                end
+            end
+        end
+    end
+
+    Aiming.Selected = ClosestPlayer
+    Aiming.SelectedPart = TargetPart
+end
+
+-- Hook metamethod cho Silent Aim
+local __index
+__index = hookmetamethod(game, "__index", function(t, k)
+    if not Aiming.Check() or not DaHoodSettings.SilentAim then return __index(t, k) end
+
+    if t:IsA("Mouse") and (k == "Hit" or k == "Target") then
+        local SelectedPart = Aiming.SelectedPart
+        if SelectedPart then
+            local Hit = SelectedPart.CFrame + (SelectedPart.Velocity * DaHoodSettings.Prediction)
+            return k == "Hit" and Hit or SelectedPart
+        end
+    end
+    return __index(t, k)
+end)
+
+-- AimLock
+RunService:BindToRenderStep("AimLock", 0, function()
+    if DaHoodSettings.AimLock and Aiming.Check() and UserInputService:IsKeyDown(DaHoodSettings.AimLockKeybind) then
+        local SelectedPart = Aiming.SelectedPart
+        local Hit = SelectedPart.CFrame + (SelectedPart.Velocity * DaHoodSettings.Prediction)
+        CurrentCamera.CFrame = CurrentCamera.CFrame:Lerp(CFrame.lookAt(CurrentCamera.CFrame.Position, Hit.Position), 0.2)
+    end
+end)
+
+-- Cập nhật liên tục
+Heartbeat:Connect(function()
+    Aiming.UpdateFOV()
+    Aiming.GetClosestPlayerToCursor()
+end)
+
+print("Silent Aim for Da Hood loaded. Press " .. DaHoodSettings.AimLockKeybind.Name .. " for AimLock.")
+return Aiming
